@@ -123,3 +123,5 @@ void evolve(double* y_colloid, double* phi, int system_size, long n_sites, long 
 
 	}
 }
+
+// TODO: neighbours
