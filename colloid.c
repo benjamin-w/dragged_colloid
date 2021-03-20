@@ -113,10 +113,6 @@ void evolve(int system_size, long n_sites, long n_timestep)
 	// Model B
 	long tstep;
 
-	int q = pow(2, dim); // coordination number
-	long N1 = n_sites;
-	long N2 = n_sites*n_sites;
-	
 	double* new_phi;
 	ALLOC(new_phi, n_sites);
 	
@@ -135,14 +131,10 @@ void evolve(int system_size, long n_sites, long n_timestep)
 	double* noise_gradient;
 	ALLOC(noise_gradient, n_sites);	
 
-	double 
-	double buffer;
-	long pos;
-	
-	int i;
 
 	for(tstep = 0; tstep < n_timestep; tstep++)
 	{
+		/* I'm sure this can be optimised, but at least its explicit enough to see what's going on*/
 		// Evaluate Lattice Laplacian
 		laplacian( &laplacian_phi, phi, n_sites);			// Write Laplacian of phi into laplacian_phi
 		laplacian( &laplacian_square_phi, laplacian_phi, n_sites);	// Write (D^2)^2 phi into laplacian_square_phi 
@@ -152,24 +144,46 @@ void evolve(int system_size, long n_sites, long n_timestep)
 	
 		// Add together to new step d/dt phi = -a * D2 phi - b D4 phi - u D2 (phi^3) + D * noise 
 		phi_time_step(&new_phi, laplacian_phi, laplacian_square_phi, laplacian_phi_cubed, noise_gradient, parameters); 
-		swap(&new_phi, &phi);
+		deep_swap(&new_phi, &phi);
 		measure(phi); // Evaluate all sorts of correlators etc. here
 	}
 }
 
 void laplacian(double** output_ptr,  double* ptr, long n_sites)
 {
-	int buffer = 0.0;
-	for(i = 0; i < 2*dim; i++)
+	int buffer;
+	long pos, i;
+	for(pos = 0; pos < n_sites; pos++)
 	{
-		buffer += ptr[neighbours[pos][i]]; 
+		buffer = 0;
+		for(i = 0; i < 2*dim; i++)
+		{
+			buffer += ptr[neighbours[pos][i]]; 
+		}
+		buffer -= (2*dim*ptr[pos]);
+		(*output_ptr)[pos] = buffer;
 	}
-	buffer -= (2*dim*phi[pos]);
-	return buffer;
 }
 
-double laplacian_square( double* ptr, long n_sites, long pos);
+void laplacian_of_cube(double** output_ptr,  double* ptr, long n_sites)
 {
-	// D4 f(x) = D2f(x+h) + D2f(x-h) - 2 D2f(x)
-	
+	// Optimisation: Evaluate this together with laplacian at a later stage
+	int buffer;
+	long pos, i;
+	for(pos = 0; pos < n_sites; pos++)
+	{
+		buffer = 0;
+		for(i = 0; i < 2*dim; i++)
+		{
+			buffer += (ptr[neighbours[pos][i]] * ptr[neighbours[pos][i]] * ptr[neighbours[pos][i]]); // I'm sure compiler knows how to optimise this
+		}
+		buffer -= (2*dim*ptr[pos] * ptr[pos] * ptr[pos]);
+		(*output_ptr)[pos] = buffer;
+	}
 }
+
+void generate_noise_field();
+void gradient_field();
+void phi_time_step();
+void deep_swap();
+void measure();
