@@ -62,6 +62,7 @@ gsl_rng *r;
 void default_parameters(parameter*);
 void initialise(double**, double**, long***, parameter*);
 void initialise_observable(observables*, parameter*);
+void wipe(double**, double**, parameter*);
 void evolveB(double**, double**, long**, parameter*, observables*);
 void evolveA(double**, double**, long**, parameter*, observables*);
 void laplacian(double**, double*, long**, long);
@@ -71,6 +72,7 @@ void gradient_field(double**, double*, long**, long);
 void phi_evolveB(double**, double*, double*, double*, double*, long, parameter*, double*, long **);
 void phi_evolveA(double**, double*, double*, long, parameter*, double*);
 void measure(double**, double**, long, parameter*, observables*);
+void print_observables(observables*, parameter*);
 void printhelp(void);
 void print_source(void);
 void neighborhood(long***, int);
@@ -156,23 +158,31 @@ int main(int argc, char *argv[]){
 		if( neighbours[i] == NULL){printf("Allocation of A VERY POLITE ARRAY failed. Terminate. \n"); exit(2);}
 	} 
 
+	// Initialise fields
+	initialise(&phi, &y_colloid, &neighbours, &params);
+	
 	// Initialise observables
 	observables obvs;	// Creates a pointer to an observables structure
 	initialise_observable(&obvs, &params);
 
 	// MC Iteration
-	
+	int mc_counter;
+	int mc_runs = 10; // Add this to options
+	for(mc_counter = 0; mc_counter < mc_runs; mc_counter++)
+	{
 		// Numerical integration of the dynamics
-		
-		initialise(&phi, &y_colloid, &neighbours, &params);
-		
 		if(MOD==0){															// Model A
 			evolveA(&phi, &y_colloid, neighbours,&params, &obvs);
 		}
 		else{																// Model B
 			evolveB(&phi, &y_colloid, neighbours, &params, &obvs);
 		}
-		
+
+		wipe(&phi, &y_colloid, &params); // Reset to initial condition
+	}
+
+	print_observables(&obvs, &params);
+
 	// Free memory and exit
 	free(phi);
 	free(y_colloid);
@@ -182,6 +192,22 @@ int main(int argc, char *argv[]){
 
 
 // DEFINITION OF FUNCTIONS
+
+void print_observables(observables* obvs, parameter* params)
+{
+	int i,j;
+	int system_size = params->system_size;
+	int write_count = obvs->write_count;
+	for(i = 0; i < write_count; i ++)
+	{
+		printf("#FIELDCORR %g", i * (obvs->write_time_delta));
+		for(j = 0; j < system_size; j++)
+		{
+			printf("\t%g", obvs->field_correlation[i][j]);
+		}
+		printf("\n");
+	}
+}
 
 // Default parameters
 void default_parameters(parameter* params){
@@ -259,6 +285,20 @@ void neighborhood(long*** list, int L){
 	}
 }
 
+// Reset field and colloid to init. cond.
+void wipe(double** phi, double** y_colloid, parameter* params)
+{
+	int n_sites, i;
+	n_sites = intpow(params->system_size, DIM);
+	for(i = 0; i < n_sites; i++){ 
+		 (*phi)[i] = gsl_ran_gaussian_ziggurat(r,1.0); 
+	}
+	
+	// y - colloid (initially in the middle of the lattice, where the harmonic well stands)
+	long L = params->system_size;
+	for(i=0; i<DIM; i++) (*y_colloid)[i] = ind2j(i, n_sites/2 ,L);
+}
+
 // Model B evolution
 void evolveB(double** phi, double** y_colloid, long** neighbours, parameter* params, observables* obvs){
 	// Preparing variables for field evolution (Euler-Maruyama)
@@ -289,7 +329,6 @@ void evolveB(double** phi, double** y_colloid, long** neighbours, parameter* par
 	int write_time_delta_step = (int) ((obvs->write_time_delta)/(params->delta_t));
 	int next_writing_step = 0;
 	obvs->write_count = 0;
-	if(DEBUG){printf("write_time_delta_step %i\n", write_time_delta_step);}
 	
 	for(tstep = 0; tstep < n_timestep; tstep++){									// Time evolution
 	
@@ -342,6 +381,7 @@ void evolveB(double** phi, double** y_colloid, long** neighbours, parameter* par
 			next_writing_step += write_time_delta_step;
 			obvs->write_count++;
 		}
+
 	}
 }
 
@@ -496,10 +536,10 @@ void gradient_field(double** grad_noise, double* noise, long** neighbours, long 
 void measure(double** phi, double** y_colloid, long tstep, parameter* params, observables* obvs){
 	long i;
 	//printf("%g\t", tstep*params->delta_t);
-	/*for(i = 0; i < params->system_size; i++)
+	for(i = 0; i < params->system_size; i++)
 	{
 		obvs->field_correlation[obvs->write_count][i] += ((*phi)[0] * (*phi)[i]);
-	}*/	
+	}	
 	
 	if(DEBUG){printf("# write_count: %i \n", obvs->write_count);}
 	for(i = 0; i < DIM; i++)
