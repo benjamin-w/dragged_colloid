@@ -7,6 +7,7 @@
 - No boundary conditions on the colloid displacement; they only get enforced when locating the nearest site.
 - Space is measured in units of the lattice spacing.
 - Point-like colloid version.
+- B: I removed periodic boundary conditions for the colloid. The field has PBC, the colloid has not. 
 
 TODO
 - check SEED
@@ -28,7 +29,7 @@ TODO
 #define DD printf("# Debug: line %d \n",__LINE__);
 #define DEBUG (1)
 #define DIM (3) 														// Dimension 
-#define MOD 0															// 0 for Model A, 2 for Model B
+#define MOD 2															// 0 for Model A, 2 for Model B
 
 typedef struct{
 	double mass;														// Mass of the field
@@ -43,6 +44,14 @@ typedef struct{
 	long n_timestep;													// Number of timesteps
 } parameter;
 
+typedef struct{				// This structure bundles all observables 
+	double** field_correlation;	// Saves the measured field-correlator < phi[0] phi[i]> for certain subset of i's (eg along an axis) AND at all writing times
+	double* colloid_msd;		// Saves the measured mean square displacement of the colloid at all writing times
+	double write_time_delta;	// This is the gap between writing times (at the moment linear, maybe later exponential writing times?) 
+	int write_count;
+//	double* colloid_fpt_distribution;	// Saves the first-passage time distribution of the colloid
+} observables;
+
 // GSL RNG (it turns out that Ziggurat is faster than Box-Muller)
 const gsl_rng_type *T;
 gsl_rng *r;
@@ -52,15 +61,16 @@ gsl_rng *r;
 
 void default_parameters(parameter*);
 void initialise(double**, double**, long***, parameter*);
-void evolveB(double**, double**, long**, parameter*);
-void evolveA(double**, double**, long**, parameter*);
+void initialise_observable(observables*, parameter*);
+void evolveB(double**, double**, long**, parameter*, observables*);
+void evolveA(double**, double**, long**, parameter*, observables*);
 void laplacian(double**, double*, long**, long);
 void laplacian_of_cube(double**, double*, long**, long);
 void generate_noise_field(double**, long, parameter*);
 void gradient_field(double**, double*, long**, long);
 void phi_evolveB(double**, double*, double*, double*, double*, long, parameter*, double*, long **);
 void phi_evolveA(double**, double*, double*, long, parameter*, double*);
-void measure(double**, long, parameter*);
+void measure(double**, double**, long, parameter*, observables*);
 void printhelp(void);
 void print_source(void);
 void neighborhood(long***, int);
@@ -76,9 +86,7 @@ double floatpow(double, int);
 
 int main(int argc, char *argv[]){
 	setlinebuf(stdout);
-	printf("# RNG Seed %i\n",3%10);
-	printf("# RNG Seed %i\n",(-3)%10);
-
+	
 	// Input
 	parameter params;
 	default_parameters(&params);
@@ -145,19 +153,25 @@ int main(int argc, char *argv[]){
 	//for(i = 0; i < n_sites; i++) ALLOC(neighbours[i], 2 * DIM); 		// At each index there are 2*D neighbours
 	for(i = 0; i < n_sites; i++) {
 		neighbours[i]=calloc( 2 * DIM , sizeof(long)); 
-		if( neighbours[i] == NULL){printf("Allocation of your mum failed. Terminate. \n"); exit(2);}
+		if( neighbours[i] == NULL){printf("Allocation of A VERY POLITE ARRAY failed. Terminate. \n"); exit(2);}
 	} 
 
-	// Numerical integration of the dynamics
+	// Initialise observables
+	observables obvs;	// Creates a pointer to an observables structure
+	initialise_observable(&obvs, &params);
+
+	// MC Iteration
 	
-	initialise(&phi, &y_colloid, &neighbours, &params);
-	
-	if(MOD==0){															// Model A
-		evolveA(&phi, &y_colloid, neighbours,&params);
-	}
-	else{																// Model B
-		evolveB(&phi, &y_colloid, neighbours, &params);
-	}
+		// Numerical integration of the dynamics
+		
+		initialise(&phi, &y_colloid, &neighbours, &params);
+		
+		if(MOD==0){															// Model A
+			evolveA(&phi, &y_colloid, neighbours,&params, &obvs);
+		}
+		else{																// Model B
+			evolveB(&phi, &y_colloid, neighbours, &params, &obvs);
+		}
 		
 	// Free memory and exit
 	free(phi);
@@ -179,7 +193,7 @@ void default_parameters(parameter* params){
 	params->trap_strength = 1.0;
 	params->rng_seed = -1; 												// if seed is -1 (not given by user), it will be picked randomly in 'initialise'
 	params->system_size = 32;
-	params->delta_t = 0.0001;
+	params->delta_t = 0.001;
 	params->n_timestep = 10;
 }
 
@@ -208,6 +222,23 @@ void initialise(double** phi, double** y_colloid, long*** neighbours, parameter*
 	neighborhood(neighbours,L);
 }
 
+// This initialises the observables structure later containing the measuremnrs
+void initialise_observable(observables* obvs, parameter* params)
+{
+	obvs->write_time_delta = 0.2; // This is in physical time units, so writing occurs every (write_time_delta / n_timestep) integration step
+	
+	int writing_times = (int)(1 + (((params->n_timestep)*params->delta_t)/obvs->write_time_delta)); // This counts how many writing events will occur in time (including t=0, thus + 1)
+	if(DEBUG){printf("writing_times %i, n_timestep %lu, delta_t = %g, write_time_delta %g \n ", writing_times,params->n_timestep,  params->delta_t, obvs->write_time_delta);}
+	CALLOC(obvs->colloid_msd, writing_times); // Save MSD vs time
+	CALLOC(obvs->field_correlation, writing_times); // Prepare writing_times many arrays to store correlations
+	int i;
+	for(i = 0; i < writing_times; i++)
+	{
+		obvs->field_correlation[i] = calloc( params->system_size , sizeof(double) );
+		if( (obvs->field_correlation[i]) == NULL){printf("Allocation of '(obvs->field_correlation[%i])'  failed. Terminate. \n", i); exit(2);} 
+	}
+}
+
 // Creates list of nearest neighbours in DIM dimensions
 void neighborhood(long*** list, int L){
 	int k,d;
@@ -226,17 +257,10 @@ void neighborhood(long*** list, int L){
 			neigh[d] = vec[d];											// Restores local copy (prepares for next dimension)
 		}
 	}
-	if(DEBUG)
-	{
-		for(k=0; k < 2*DIM; k++)
-		{
-			printf("# CHECKNEIGHBOUR \t%li\t%li\n", (*list)[0][k], (*list)[L*DIM-1][k]);
-		}
-	}
 }
 
 // Model B evolution
-void evolveB(double** phi, double** y_colloid, long** neighbours, parameter* params){
+void evolveB(double** phi, double** y_colloid, long** neighbours, parameter* params, observables* obvs){
 	// Preparing variables for field evolution (Euler-Maruyama)
 	long tstep, n_sites, n_timestep;
 	n_sites = intpow(params->system_size, DIM);
@@ -260,6 +284,12 @@ void evolveB(double** phi, double** y_colloid, long** neighbours, parameter* par
 	long L = params->system_size;
 	double noise_intensity = sqrt(2.0 * params->temperature * params->relativeD * params->delta_t);
 	for(i=0; i<DIM; i++) w[i] = ind2j(i,n_sites/2,L);								// Finds position of the harmonic well
+	
+	// Preparing measurement process
+	int write_time_delta_step = (int) ((obvs->write_time_delta)/(params->delta_t));
+	int next_writing_step = 0;
+	obvs->write_count = 0;
+	if(DEBUG){printf("write_time_delta_step %i\n", write_time_delta_step);}
 	
 	for(tstep = 0; tstep < n_timestep; tstep++){									// Time evolution
 	
@@ -306,12 +336,17 @@ void evolveB(double** phi, double** y_colloid, long** neighbours, parameter* par
 		}
 
 		// v) Measures
-		measure(phi, tstep, params); 												// Evaluate all sorts of correlators etc. here
+		if(tstep > next_writing_step)
+		{
+			measure(phi, y_colloid, tstep, params, obvs); 												// Evaluate all sorts of correlators etc. here
+			next_writing_step += write_time_delta_step;
+			obvs->write_count++;
+		}
 	}
 }
 
 // Model A evolution
-void evolveA(double** phi, double** y_colloid, long** neighbours, parameter* params){
+void evolveA(double** phi, double** y_colloid, long** neighbours, parameter* params, observables* obvs){
 	// Preparing variables for field evolution (Euler-Maruyama)
 	long tstep, n_sites, n_timestep;
 	n_sites = intpow(params->system_size, DIM);
@@ -372,9 +407,10 @@ void evolveA(double** phi, double** y_colloid, long** neighbours, parameter* par
 		}
 
 		// v) Measures
-		measure(phi, tstep, params); 												// Evaluate all sorts of correlators etc. here
+		measure(phi, y_colloid, tstep, params, obvs); 												// Evaluate all sorts of correlators etc. here
 	}
 }
+
 
 // Field evolution - Model B
 void phi_evolveB(double** phi, double* laplacian_phi, double* laplacian_square_phi, double* laplacian_phi_cubed, double* noise_gradient, long n_sites, parameter* params, double* Y, long ** neighbours){
@@ -457,11 +493,20 @@ void gradient_field(double** grad_noise, double* noise, long** neighbours, long 
 }
 
 // Perform measurements and print them out
-void measure(double** phi, long tstep, parameter* params){
+void measure(double** phi, double** y_colloid, long tstep, parameter* params, observables* obvs){
 	long i;
-	printf("%g\t", tstep*params->delta_t);
-	for(i = 0; i < params->system_size; i++) printf("%g\t",((*phi)[0]) * (*phi)[i] );
-	printf("\n");
+	//printf("%g\t", tstep*params->delta_t);
+	/*for(i = 0; i < params->system_size; i++)
+	{
+		obvs->field_correlation[obvs->write_count][i] += ((*phi)[0] * (*phi)[i]);
+	}*/	
+	
+	if(DEBUG){printf("# write_count: %i \n", obvs->write_count);}
+	for(i = 0; i < DIM; i++)
+	{
+		obvs->colloid_msd[obvs->write_count] += ((*y_colloid)[i]* (*y_colloid)[i]);
+	}
+	//printf("\n");
 }
 
 // Translate from a list index (i) to lattice indicex j, and viceversa.
@@ -475,7 +520,7 @@ int vec2ind(int *vec, int L){
 // Finds index of closest lattice site to the vector "vec" 
 int closest_site(double *vec, int L){
 	int i, site=0;
-	for(i=0; i<DIM; i++) site += (int)round(vec[i])%L * intpow(L,i);
+	for(i=0; i<DIM; i++) site += (((int)(round( vec[i] ))  % L) * intpow(L,i));
 	return site;
 }
 

@@ -3,6 +3,7 @@
 CC = gcc
 LDFLAGS = -lm -lgsl -lgslcblas 
 OPTIM = -O3
+CFLAGS = -Wall
 
 ALL_SRCS=$(wildcard *.c)
 SRCS = $(filter-out mt199337.c, $(ALL_SRCS))
