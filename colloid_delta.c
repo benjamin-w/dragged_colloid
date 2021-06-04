@@ -7,6 +7,9 @@
 - No boundary conditions on the colloid displacement; they only get enforced when locating the nearest site.
 - Space is measured in units of the lattice spacing.
 - Point-like colloid version.
+
+TODO
+- check SEED
 */
 
 // LIBRARIES, TYPES, DEFINITIONS
@@ -21,8 +24,9 @@
 
 #define ALLOC(p,n)  (p)=malloc( (n) * sizeof(*(p))); if( (p) == NULL){printf("Allocation of '%s' failed. Terminate. \n", #p); exit(2); } 
 #define CALLOC(p,n)  (p)=calloc( (n) , sizeof(*(p))); if( (p) == NULL){printf("Allocation of '%s' failed. Terminate. \n", #p); exit(2); } 
-#define long unsigned long						 						// This is to make long hold twice as much
+//#define long unsigned long						 						// This is to make long hold twice as much
 #define DD printf("# Debug: line %d \n",__LINE__);
+#define DEBUG (1)
 #define DIM (3) 														// Dimension 
 #define MOD 0															// 0 for Model A, 2 for Model B
 
@@ -36,6 +40,7 @@ typedef struct{
 	int rng_seed;														// Seed for random number generator
 	int system_size;													// Side of the DIM-dimensional lattice
 	double delta_t;														// Time-discretization step
+	long n_timestep;													// Number of timesteps
 } parameter;
 
 // GSL RNG (it turns out that Ziggurat is faster than Box-Muller)
@@ -46,9 +51,9 @@ gsl_rng *r;
 // FUNCTION PROTOTYPES
 
 void default_parameters(parameter*);
-void initialise(double**, double**, long***, long, parameter*);
-void evolveB(double**, double**, long**, long, long, parameter*);
-void evolveA(double**, double**, long**, long, long, parameter*);
+void initialise(double**, double**, long***, parameter*);
+void evolveB(double**, double**, long**, parameter*);
+void evolveA(double**, double**, long**, parameter*);
 void laplacian(double**, double*, long**, long);
 void laplacian_of_cube(double**, double*, long**, long);
 void generate_noise_field(double**, long, parameter*);
@@ -71,6 +76,8 @@ double floatpow(double, int);
 
 int main(int argc, char *argv[]){
 	setlinebuf(stdout);
+	printf("# RNG Seed %i\n",3%10);
+	printf("# RNG Seed %i\n",(-3)%10);
 
 	// Input
 	parameter params;
@@ -105,6 +112,12 @@ int main(int argc, char *argv[]){
 			case 'S':
 				params.rng_seed = atoi(optarg);
 				break;
+			case 't':
+				params.delta_t = atof(optarg);
+				break;
+			case 'N':
+				params.n_timestep = atol(optarg);
+				break;
 			case 'X':
 				print_source();
 				exit(2);
@@ -120,7 +133,6 @@ int main(int argc, char *argv[]){
 	// Variables
 	int i;
 	long n_sites = intpow(params.system_size, DIM);
-	long n_timestep = 1000;
 	
 	double* phi; 														// Field on lattice NxNxN
 	double* y_colloid; 													// Colloid position (DIM real numbers)
@@ -130,17 +142,21 @@ int main(int argc, char *argv[]){
 	CALLOC(y_colloid, DIM);
 	ALLOC(neighbours, n_sites);
 
-	for(i = 0; i < n_sites; i++) CALLOC(neighbours[i], 2 * DIM); 		// At each index there are 2*D neighbours
+	//for(i = 0; i < n_sites; i++) ALLOC(neighbours[i], 2 * DIM); 		// At each index there are 2*D neighbours
+	for(i = 0; i < n_sites; i++) {
+		neighbours[i]=calloc( 2 * DIM , sizeof(long)); 
+		if( neighbours[i] == NULL){printf("Allocation of your mum failed. Terminate. \n"); exit(2);}
+	} 
 
 	// Numerical integration of the dynamics
 	
-	initialise(&phi, &y_colloid, &neighbours, n_sites, &params);
+	initialise(&phi, &y_colloid, &neighbours, &params);
 	
 	if(MOD==0){															// Model A
-		evolveA(&phi, &y_colloid, neighbours, n_sites, n_timestep, &params);
+		evolveA(&phi, &y_colloid, neighbours,&params);
 	}
 	else{																// Model B
-		evolveB(&phi, &y_colloid, neighbours, n_sites, n_timestep, &params);
+		evolveB(&phi, &y_colloid, neighbours, &params);
 	}
 		
 	// Free memory and exit
@@ -164,27 +180,29 @@ void default_parameters(parameter* params){
 	params->rng_seed = -1; 												// if seed is -1 (not given by user), it will be picked randomly in 'initialise'
 	params->system_size = 32;
 	params->delta_t = 0.0001;
+	params->n_timestep = 10;
 }
 
 // All that needs to be done once
-void initialise(double** phi, double** y_colloid, long*** neighbours, long n_sites, parameter* params){
+void initialise(double** phi, double** y_colloid, long*** neighbours, parameter* params){
 	// i) GSL random number generator setup
 	gsl_rng_env_setup();
-        T = gsl_rng_default;
-        r = gsl_rng_alloc (T);
-        if(params->rng_seed==-1) params->rng_seed = ((int) (((int) clock() ) % 100000)); // If no seed provided, draw a random one
-        gsl_rng_set(r, params->rng_seed);
-        printf("# RNG Seed %i\n",params->rng_seed);
+    T = gsl_rng_default;
+    r = gsl_rng_alloc (T);
+    if(params->rng_seed==-1) params->rng_seed = ((int) (((int) clock() ) % 100000)); // If no seed provided, draw a random one
+    gsl_rng_set(r, params->rng_seed);
+    printf("# RNG Seed %i\n",params->rng_seed);
 	
 	// ii) Initialise physical variables: phi, y
-	long i, j;															// We sample from an infinite temperature state. Maybe something else would be better.
+	long i, n_sites;																// We sample from an infinite temperature state. Maybe something else would be better.
+	n_sites = intpow(params->system_size, DIM);
 	for(i = 0; i < n_sites; i++){ 
 		 (*phi)[i] = gsl_ran_gaussian_ziggurat(r,1.0); 
 	}
 	
 	// y - colloid (initially in the middle of the lattice, where the harmonic well stands)
 	long L = params->system_size;
-	for(i=0; i<DIM; i++) (*y_colloid)[i] = ind2j(i,n_sites/2,L);
+	for(i=0; i<DIM; i++) (*y_colloid)[i] = ind2j(i, n_sites/2 ,L);
 	
 	// iii) What are each position's neighbours?
 	neighborhood(neighbours,L);
@@ -208,12 +226,22 @@ void neighborhood(long*** list, int L){
 			neigh[d] = vec[d];											// Restores local copy (prepares for next dimension)
 		}
 	}
+	if(DEBUG)
+	{
+		for(k=0; k < 2*DIM; k++)
+		{
+			printf("# CHECKNEIGHBOUR \t%li\t%li\n", (*list)[0][k], (*list)[L*DIM-1][k]);
+		}
+	}
 }
 
 // Model B evolution
-void evolveB(double** phi, double** y_colloid, long** neighbours, long n_sites, long n_timestep, parameter* params){
+void evolveB(double** phi, double** y_colloid, long** neighbours, parameter* params){
 	// Preparing variables for field evolution (Euler-Maruyama)
-	long tstep;
+	long tstep, n_sites, n_timestep;
+	n_sites = intpow(params->system_size, DIM);
+	n_timestep = params->n_timestep;
+	
 	double* laplacian_phi;
 	ALLOC(laplacian_phi, n_sites);
 	double* laplacian_square_phi;
@@ -226,8 +254,8 @@ void evolveB(double** phi, double** y_colloid, long** neighbours, long n_sites, 
 	ALLOC(noise_gradient, n_sites);
 	
 	// Preparing variables for colloid evolution (Stochastic Runge-Kutta II)
-	int i, j, y_site;
-	double grad, noise, y_old, F2;
+	int i, y_site;
+	double grad, noise, F2;															// There was also y_old but I think it's obsolete
 	double w[DIM], F1[DIM], Y[3]={0};
 	long L = params->system_size;
 	double noise_intensity = sqrt(2.0 * params->temperature * params->relativeD * params->delta_t);
@@ -283,17 +311,20 @@ void evolveB(double** phi, double** y_colloid, long** neighbours, long n_sites, 
 }
 
 // Model A evolution
-void evolveA(double** phi, double** y_colloid, long** neighbours, long n_sites, long n_timestep, parameter* params){
+void evolveA(double** phi, double** y_colloid, long** neighbours, parameter* params){
 	// Preparing variables for field evolution (Euler-Maruyama)
-	long tstep;
+	long tstep, n_sites, n_timestep;
+	n_sites = intpow(params->system_size, DIM);
+	n_timestep = params->n_timestep;
+	
 	double* laplacian_phi;
 	ALLOC(laplacian_phi, n_sites);
 	double* noise_field;
 	ALLOC(noise_field, n_sites);
 
 	// Preparing variables for colloid evolution (Stochastic Runge-Kutta II)
-	int i, j, y_site;
-	double grad, noise, y_old, F2;
+	int i, y_site;
+	double grad, noise, F2;															// There was also y_old but I think it's obsolete
 	double w[DIM], F1[DIM], Y[3]={0};
 	long L = params->system_size;
 	double noise_intensity = sqrt(2.0 * params->temperature * params->relativeD * params->delta_t);
@@ -356,7 +387,7 @@ void phi_evolveB(double** phi, double* laplacian_phi, double* laplacian_square_p
 	
 	// Interaction with the colloid
 	int y_site = closest_site(Y,L);													// Finds the lattice site closest to Y, the colloid
-	(*phi)[y_site] += delta_t * params->lambda *2*DIM;								// Ben, I think the normalization 1/2d should not have been there. Hope I was right D:
+	(*phi)[y_site] += delta_t * params->lambda *2*DIM;
 	for(i = 0; i < 2*DIM; i++) (*phi)[neighbours[y_site][i]] -= delta_t * params->lambda;
 }
 
@@ -458,6 +489,7 @@ unsigned int factorial(unsigned int n){
 int intpow(int a, int b){
 	int i, res=1;
 	for(i=0; i<b; i++) res *= a;
+	return res;
 } 
 
 // The usual pow(a,b)=exp(log(a) * b) is slow AF
@@ -465,6 +497,7 @@ double floatpow(double a, int b){
 	int i;
 	double res=1;
 	for(i=0; i<b; i++) res *= a;
+	return res;
 } 
 
 // Prints out the instructions
@@ -479,6 +512,8 @@ void printhelp(void){
 # -D Relative motility colloid/field\n\
 # -k Strength of harmonic trap\n\
 # -S Seed for RNG\n\
+# -t Integration timestep\n\
+# -N Number of timesteps\n\
 # -h To see this helpscreen\n\
 # -X Output source code\n",__FILE__,__DATE__);
 }
