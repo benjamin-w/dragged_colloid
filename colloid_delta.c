@@ -7,10 +7,11 @@
 - No boundary conditions on the colloid displacement; they only get enforced when locating the nearest site.
 - Space is measured in units of the lattice spacing.
 - Point-like colloid version.
-- B: I removed periodic boundary conditions for the colloid. The field has PBC, the colloid has not. 
 
 TODO
 - check SEED
+- B: All I have done is MODEL B, I haven't worked on 'evolveA', hoping there'll be a way to merge evolveA and evolveB into a single function.
+
 */
 
 // LIBRARIES, TYPES, DEFINITIONS
@@ -28,9 +29,9 @@ TODO
 //#define long unsigned long						 						// This is to make long hold twice as much
 #define DD printf("# Debug: line %d \n",__LINE__);
 #define DEBUG (1)
-#define DIM (3) 														// Dimension 
 #define MOD 2															// 0 for Model A, 2 for Model B
 
+// Data types
 typedef struct{
 	double mass;														// Mass of the field
 	double lambda;														// Field-colloid coupling strength
@@ -42,9 +43,11 @@ typedef struct{
 	int system_size;													// Side of the DIM-dimensional lattice
 	double delta_t;														// Time-discretization step
 	long n_timestep;													// Number of timesteps
+	int mc_runs;														// Number of Monte Carlo iterations
 } parameter;
 
 typedef struct{				// This structure bundles all observables 
+	double** field_average;		// Saves the measured field-average <phi[i]> for certain subset of i's (eg along an axis) AND at all writing times
 	double** field_correlation;	// Saves the measured field-correlator < phi[0] phi[i]> for certain subset of i's (eg along an axis) AND at all writing times
 	double* colloid_msd;		// Saves the measured mean square displacement of the colloid at all writing times
 	double write_time_delta;	// This is the gap between writing times (at the moment linear, maybe later exponential writing times?) 
@@ -73,16 +76,20 @@ void phi_evolveB(double**, double*, double*, double*, double*, long, parameter*,
 void phi_evolveA(double**, double*, double*, long, parameter*, double*);
 void measure(double**, double**, long, parameter*, observables*);
 void print_observables(observables*, parameter*);
+void print_params(parameter*);
 void printhelp(void);
 void print_source(void);
 void neighborhood(long***, int);
 int ind2j(int, int, int);
 int vec2ind(int*, int);
 int closest_site(double *, int);
+unsigned modulo( int , unsigned );
 unsigned int factorial(unsigned int);
 int intpow(int, int);
 double floatpow(double, int);
 
+// Global variables (TODO?)
+int DIM = 1;
 
 // MAIN BODY
 
@@ -96,7 +103,7 @@ int main(int argc, char *argv[]){
 	opterr = 0;
 	int c = 0;
 	// ./colloid -r 2 -L 23 (order doesn't count)
-    while( (c = getopt (argc, argv, "L:r:l:u:T:D:k:S:N:hX") ) != -1){
+    while( (c = getopt (argc, argv, "L:r:l:u:T:d:k:S:t:N:M:D:hX") ) != -1){
     	switch(c){
 			case 'L':
 				params.system_size = atoi(optarg);
@@ -113,7 +120,7 @@ int main(int argc, char *argv[]){
 			case 'T':
 				params.temperature = atof(optarg);
 				break;
-			case 'D':
+			case 'd':
 				params.relativeD = atof(optarg);
 				break;
 			case 'k':
@@ -127,6 +134,12 @@ int main(int argc, char *argv[]){
 				break;
 			case 'N':
 				params.n_timestep = atol(optarg);
+				break;
+			case 'M':
+				params.mc_runs = atoi(optarg);
+				break;
+			case 'D':
+				DIM = atoi(optarg);
 				break;
 			case 'X':
 				print_source();
@@ -160,6 +173,8 @@ int main(int argc, char *argv[]){
 
 	// Initialise fields
 	initialise(&phi, &y_colloid, &neighbours, &params);
+
+	print_params(&params);   // Print header with all parameters
 	
 	// Initialise observables
 	observables obvs;	// Creates a pointer to an observables structure
@@ -167,10 +182,10 @@ int main(int argc, char *argv[]){
 
 	// MC Iteration
 	int mc_counter;
-	int mc_runs = 10; // Add this to options
-	for(mc_counter = 0; mc_counter < mc_runs; mc_counter++)
+	for(mc_counter = 0; mc_counter < params.mc_runs; mc_counter++)
 	{
 		// Numerical integration of the dynamics
+		//if(DEBUG){printf("#MCRUN %i\n", mc_counter);}
 		if(MOD==0){															// Model A
 			evolveA(&phi, &y_colloid, neighbours,&params, &obvs);
 		}
@@ -193,22 +208,6 @@ int main(int argc, char *argv[]){
 
 // DEFINITION OF FUNCTIONS
 
-void print_observables(observables* obvs, parameter* params)
-{
-	int i,j;
-	int system_size = params->system_size;
-	int write_count = obvs->write_count;
-	for(i = 0; i < write_count; i ++)
-	{
-		printf("#FIELDCORR %g", i * (obvs->write_time_delta));
-		for(j = 0; j < system_size; j++)
-		{
-			printf("\t%g", obvs->field_correlation[i][j]);
-		}
-		printf("\n");
-	}
-}
-
 // Default parameters
 void default_parameters(parameter* params){
 	params->mass = 0.0;
@@ -221,6 +220,7 @@ void default_parameters(parameter* params){
 	params->system_size = 32;
 	params->delta_t = 0.001;
 	params->n_timestep = 10;
+	params->mc_runs = 10;
 }
 
 // All that needs to be done once
@@ -254,14 +254,17 @@ void initialise_observable(observables* obvs, parameter* params)
 	obvs->write_time_delta = 0.2; // This is in physical time units, so writing occurs every (write_time_delta / n_timestep) integration step
 	
 	int writing_times = (int)(1 + (((params->n_timestep)*params->delta_t)/obvs->write_time_delta)); // This counts how many writing events will occur in time (including t=0, thus + 1)
-	if(DEBUG){printf("writing_times %i, n_timestep %lu, delta_t = %g, write_time_delta %g \n ", writing_times,params->n_timestep,  params->delta_t, obvs->write_time_delta);}
+	//if(DEBUG){printf("writing_times %i, n_timestep %lu, delta_t = %g, write_time_delta %g \n ", writing_times,params->n_timestep,  params->delta_t, obvs->write_time_delta);}
 	CALLOC(obvs->colloid_msd, writing_times); // Save MSD vs time
+	CALLOC(obvs->field_average, writing_times); // Prepare writing_times many arrays to store averages
 	CALLOC(obvs->field_correlation, writing_times); // Prepare writing_times many arrays to store correlations
 	int i;
 	for(i = 0; i < writing_times; i++)
 	{
 		obvs->field_correlation[i] = calloc( params->system_size , sizeof(double) );
 		if( (obvs->field_correlation[i]) == NULL){printf("Allocation of '(obvs->field_correlation[%i])'  failed. Terminate. \n", i); exit(2);} 
+		obvs->field_average[i] = calloc( params->system_size , sizeof(double) );
+		if( (obvs->field_average[i]) == NULL){printf("Allocation of '(obvs->field_average[%i])'  failed. Terminate. \n", i); exit(2);} 
 	}
 }
 
@@ -331,7 +334,7 @@ void evolveB(double** phi, double** y_colloid, long** neighbours, parameter* par
 	obvs->write_count = 0;
 	
 	for(tstep = 0; tstep < n_timestep; tstep++){									// Time evolution
-	
+		
 		// i) Create local copy of the colloid variable
 		for(i=0; i<DIM; i++) Y[i] = (*y_colloid)[i];	
 		
@@ -355,10 +358,12 @@ void evolveB(double** phi, double** y_colloid, long** neighbours, parameter* par
 		laplacian_of_cube(&laplacian_phi_cubed, *phi, neighbours, n_sites);			// Write D2 [phi(x)^3] into laplacian_phi_cubed
 		generate_noise_field(&noise_field, DIM*n_sites, params);					// Fill \vec{Lambda} with randomness
 		gradient_field(&noise_gradient, noise_field, neighbours, n_sites);			// Compute gradient noise term
-			
+		
+
 		// Add together to new step d/dt phi = -a * D2 phi - b D4 phi - u D2 (phi^3) + D * noise (D is nabla)
+		printf("time: %g ", tstep*params->delta_t);
 		phi_evolveB(phi, laplacian_phi, laplacian_square_phi, laplacian_phi_cubed, noise_gradient, n_sites, params, Y, neighbours);
-			
+
 		// iv) Correction step for the colloid (with the evolved field)
 		y_site = closest_site(*y_colloid,L);										// Compute new site of the colloid
 		
@@ -377,7 +382,8 @@ void evolveB(double** phi, double** y_colloid, long** neighbours, parameter* par
 		// v) Measures
 		if(tstep > next_writing_step)
 		{
-			measure(phi, y_colloid, tstep, params, obvs); 												// Evaluate all sorts of correlators etc. here
+			//if(DEBUG){printf("Writing at t = %g, write count %i\n", tstep*params->delta_t, obvs->write_count);}
+			measure(phi, y_colloid, tstep, params, obvs); 												// Evaluate all sorts of correlators etc. herea
 			next_writing_step += write_time_delta_step;
 			obvs->write_count++;
 		}
@@ -457,14 +463,14 @@ void phi_evolveB(double** phi, double* laplacian_phi, double* laplacian_square_p
 	long i;
 	long L = params->system_size;
 	double delta_t = params->delta_t;
+	printf("phi_old: %g, lapl_2_phi: %g, lapl_phi: %g, lapl_3_phi: %g, grad_noise: %g\n", (*phi)[0], laplacian_square_phi[0], laplacian_phi[0], laplacian_phi_cubed[0], noise_gradient[0]);
 	for(i = 0; i < n_sites; i++){
-		(*phi)[i] += (delta_t*(-laplacian_square_phi[i] - params->mass*laplacian_phi[i] - params->quartic_u * laplacian_phi_cubed[i]) + noise_gradient[i]);
+		(*phi)[i] += (delta_t*( laplacian_square_phi[i] + params->mass*laplacian_phi[i] + params->quartic_u * laplacian_phi_cubed[i]) + noise_gradient[i]);
 	}
-	
 	// Interaction with the colloid
 	int y_site = closest_site(Y,L);													// Finds the lattice site closest to Y, the colloid
 	(*phi)[y_site] += delta_t * params->lambda *2*DIM;
-	for(i = 0; i < 2*DIM; i++) (*phi)[neighbours[y_site][i]] -= delta_t * params->lambda;
+	for(i = 0; i < 2*DIM; i++){(*phi)[neighbours[y_site][i]] -= delta_t * params->lambda;}
 }
 
 // Field evolution - Model A
@@ -474,7 +480,7 @@ void phi_evolveA(double** phi, double* laplacian_phi, double* noise_field, long 
 	long L = params->system_size;
 	for(i = 0; i < n_sites; i++)													// Notice noise_field already contains delta_t in its variance
 	{
-		(*phi)[i] += delta_t*(- params->mass*(*phi)[i] + laplacian_phi[i] - params->quartic_u * floatpow((*phi)[i],3)  ) + noise_field[i];
+		(*phi)[i] += delta_t*(- params->mass*(*phi)[i] + laplacian_phi[i] + params->quartic_u * floatpow((*phi)[i],3)  ) + noise_field[i];
 	}
 	
 	// Interaction with the colloid
@@ -484,11 +490,11 @@ void phi_evolveA(double** phi, double* laplacian_phi, double* noise_field, long 
 
 // Returns Laplacian as calculated from cubic neighbour cells in DIM dimensions
 void laplacian(double** laplacian,  double* field, long** neighbours, long n_sites){
-	int buffer;
+	double buffer;
 	long pos, i;
 	for(pos = 0; pos < n_sites; pos++){
 		buffer = 0;
-		for(i = 0; i < 2*DIM; i++) buffer += field[neighbours[pos][i]]; 
+		for(i = 0; i < 2*DIM; i++) {buffer += field[neighbours[pos][i]]; }
 		buffer -= (2*DIM*field[pos]);
 		(*laplacian)[pos] = buffer;
 	}
@@ -496,12 +502,12 @@ void laplacian(double** laplacian,  double* field, long** neighbours, long n_sit
 
 // Returns the Laplacian of field^3
 void laplacian_of_cube(double** laplacian,  double* field, long** neighbours, long n_sites){
-	int buffer;
+	double buffer;
 	long pos, i;
 	for(pos = 0; pos < n_sites; pos++){
 		buffer = 0;
 		for(i = 0; i < 2*DIM; i++){
-			buffer += (field[neighbours[pos][i]])*(field[neighbours[pos][i]])*(field[neighbours[pos][i]]); 
+			buffer += intpow( (field[neighbours[pos][i]]), 3); 
 		}
 		buffer -= (2*DIM*field[pos]*field[pos]*field[pos]);
 		(*laplacian)[pos] = buffer;
@@ -538,13 +544,14 @@ void measure(double** phi, double** y_colloid, long tstep, parameter* params, ob
 	//printf("%g\t", tstep*params->delta_t);
 	for(i = 0; i < params->system_size; i++)
 	{
+		obvs->field_average[obvs->write_count][i] += (*phi)[i];
 		obvs->field_correlation[obvs->write_count][i] += ((*phi)[0] * (*phi)[i]);
 	}	
 	
-	if(DEBUG){printf("# write_count: %i \n", obvs->write_count);}
+	long n_sites = intpow(params->system_size , DIM);
 	for(i = 0; i < DIM; i++)
 	{
-		obvs->colloid_msd[obvs->write_count] += ((*y_colloid)[i]* (*y_colloid)[i]);
+		obvs->colloid_msd[obvs->write_count] += ((*y_colloid)[i] - ind2j(i, n_sites/2 , params->system_size))*((*y_colloid)[i] - ind2j(i, n_sites/2 , params->system_size));
 	}
 	//printf("\n");
 }
@@ -560,7 +567,10 @@ int vec2ind(int *vec, int L){
 // Finds index of closest lattice site to the vector "vec" 
 int closest_site(double *vec, int L){
 	int i, site=0;
-	for(i=0; i<DIM; i++) site += (((int)(round( vec[i] ))  % L) * intpow(L,i));
+	for(i=0; i<DIM; i++)
+	{	
+		site += (int)(modulo( round(vec[i])  , L) * intpow(L,i)); // I'm using a special modulo function to avoid getting negative return values, eg -3 % 10 = -3, but modulo(-3,10) = 7.
+	}
 	return site;
 }
 
@@ -585,6 +595,66 @@ double floatpow(double a, int b){
 	return res;
 } 
 
+unsigned modulo( int value, unsigned m) {
+// According to https://stackoverflow.com/questions/14997165/fastest-way-to-get-a-positive-modulo-in-c-c this is still fast
+    int mod = value % (int)m;
+    if (mod < 0) {
+        mod += m;
+    }
+    return mod;
+}
+
+void print_observables(observables* obvs, parameter* params)
+{
+	int i,j;
+	int system_size = params->system_size;
+	int write_count = obvs->write_count;
+	double weight = 1/((double) params->mc_runs);
+	for(i = 0; i < write_count; i ++)
+	{
+		printf("#FIELDCORR %g", i * (obvs->write_time_delta));
+		for(j = 0; j < system_size; j++)
+		{
+			printf("\t%g", weight*(obvs->field_correlation[i][j]- (obvs->field_average[i][0] * obvs->field_average[i][j]) ));
+		}
+		printf("\n");
+	}
+
+	// Output MSD of colloid
+	int dim;
+	double centre_square;	// This is y(0)^2, to be subtracted from the measured square displacement for centering.
+	for(dim = 0; dim < DIM; dim++)
+	{
+		centre_square = intpow( ind2j(dim, ( intpow(system_size , DIM) )/2 , system_size) , 2);
+	}
+
+	for(i = 0; i < write_count; i++)
+	{
+		printf("# COLLOIDMSD %g", i * (obvs->write_time_delta));
+		printf("\t%.3f",weight*(obvs->colloid_msd[i]));
+		printf("\n");
+	}
+}
+
+void print_params(parameter* params)
+{
+printf("# Parameters\n\
+# MASS %g\n\
+# LAMBDA (field-colloid-coupling) %g\n\
+# U (quartic coupling) %g\n\
+# TEMPERATURE %g\n\
+# RELATIVE MOTILITY D %g\n\
+# TRAP STRENGTH %g\n\
+# RNG SEED %u\n\
+# L (System Size) %i\n\
+# DIM %i\n\
+# DELTA T %g\n\
+# TIMESTEPS %lu\n\
+# MONTE CARLO RUNS %i\n",
+		params->mass, params->lambda, params->quartic_u, params->temperature, params->relativeD, params->trap_strength, params->rng_seed, params->system_size, DIM, params->delta_t, params->n_timestep, params->mc_runs);
+}
+
+
 // Prints out the instructions
 void printhelp(void){
 	printf("# Colloid in Gaussian Field\n# '%s' built %s\n\
@@ -594,11 +664,13 @@ void printhelp(void){
 # -l Voupling strength between colloid and field\n\
 # -u Quartic coupling strength\n\
 # -T Temperature of bath\n\
-# -D Relative motility colloid/field\n\
+# -d Relative motility colloid/field\n\
 # -k Strength of harmonic trap\n\
 # -S Seed for RNG\n\
 # -t Integration timestep\n\
+# -D Dimension\n\
 # -N Number of timesteps\n\
+# -M Number of Monte Carlo samples\n\
 # -h To see this helpscreen\n\
 # -X Output source code\n",__FILE__,__DATE__);
 }
