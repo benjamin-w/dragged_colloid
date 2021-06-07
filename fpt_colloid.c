@@ -215,7 +215,7 @@ void default_parameters(parameter* params){
 	params->quartic_u = 0.25;
 	params->temperature = 1.0;
 	params->relativeD = 1.0;
-	params->trap_strength = 1.0;
+	params->trap_strength = 0.0;
 	params->rng_seed = -1; 												// if seed is -1 (not given by user), it will be picked randomly in 'initialise'
 	params->system_size = 32;
 	params->delta_t = 0.001;
@@ -252,7 +252,7 @@ void initialise(double** phi, double** y_colloid, long*** neighbours, parameter*
 // This initialises the observables structure later containing the measuremnrs
 void initialise_observable(observables* obvs, parameter* params)
 {
-	obvs->write_time_delta = 0.2; // This is in physical time units, so writing occurs every (write_time_delta / n_timestep) integration step
+	obvs->write_time_delta = 0.02; // This is in physical time units, so writing occurs every (write_time_delta / n_timestep) integration step
 	
 	int writing_times = (int)(1 + (((params->n_timestep)*params->delta_t)/obvs->write_time_delta)); // This counts how many writing events will occur in time (including t=0, thus + 1)
 	//if(DEBUG){printf("writing_times %i, n_timestep %lu, delta_t = %g, write_time_delta %g \n ", writing_times,params->n_timestep,  params->delta_t, obvs->write_time_delta);}
@@ -335,30 +335,31 @@ void evolveB(double** phi, double** y_colloid, long** neighbours, parameter* par
 	int write_time_delta_step = (int) ((obvs->write_time_delta)/(params->delta_t));
 	int next_writing_step = 0;
 	obvs->write_count = 0;
-	
-	// Switch of coupling during thermalisation
-	double true_lambda = params->lambda;
-	params->lambda = 0.0;
-	double thermal_time = 1.0;
-	int thermal_steps = ((int) (thermal_time/params->delta_t));
 
-	for(tstep = -thermal_steps; tstep < n_timestep; tstep++){									// Time evolution
+	int thermal_time = (int)( (0.5/((double) params->delta_t))); // After this time, the field has thermalised
+	double barrier;
+	// Pre-quench the coupling is zero
+	double true_lambda = params->lambda; // post-quench lambda
+	params->lambda = 0.0; // Set lambda to zero to let field relax without the colloids presence
+
+	for(tstep = 0; tstep < n_timestep; tstep++){									// Time evolution
 		// v) Measures
-
-		if(tstep == 0)
-		{
-			// By now, the field has thermalised
-			params->lambda = true_lambda;
-			for(i=0; i<DIM; i++) (*y_colloid)[i] = ind2j(i, n_sites/2 ,L); // Put the colloid back in the centre
-		}
-
-		if(tstep == next_writing_step)
+		/*if(tstep == next_writing_step)
 		{
 			//if(DEBUG){printf("Writing at t = %g, write count %i\n", tstep*params->delta_t, obvs->write_count);}
 			measure(phi, y_colloid, tstep, params, obvs); 												// Evaluate all sorts of correlators etc. herea
 			next_writing_step += write_time_delta_step;
 			obvs->write_count++;
+		}*/
+		if(tstep == thermal_time)
+		{
+			// This is when the field is assumed to be thermalised
+			(*y_colloid)[0] = (((double) L)/2.); // The tracked coordinate is now initialised somewhere ( at the middle, say)
+			barrier = (*y_colloid)[0] - 1.0; // Now set a barrier to say, 3 to the left.
+			params->lambda = true_lambda; // Set lambda to actual value to initiate interaction between colloid and field
 		}
+
+		
 
 		// i) Create local copy of the colloid variable
 		for(i=0; i<DIM; i++) Y[i] = (*y_colloid)[i];	
@@ -402,6 +403,16 @@ void evolveB(double** phi, double** y_colloid, long** neighbours, parameter* par
 			noise = noise_intensity * gsl_ran_gaussian_ziggurat(r, 1.0);
 			(*y_colloid)[i] = Y[i] + 0.5*(F1[i]+F2)*params->delta_t + noise;
 		}
+	
+		if(tstep > thermal_time)
+		{
+			if( (*y_colloid)[0] < barrier)
+			{
+				printf("#FPT %.6f\n", (tstep-thermal_time)*params->delta_t);
+				tstep = n_timestep+10; // Abort this loop
+			}
+		}
+
 
 		
 	}
