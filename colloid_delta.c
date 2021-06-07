@@ -237,7 +237,8 @@ void initialise(double** phi, double** y_colloid, long*** neighbours, parameter*
 	long i, n_sites;																// We sample from an infinite temperature state. Maybe something else would be better.
 	n_sites = intpow(params->system_size, DIM);
 	for(i = 0; i < n_sites; i++){ 
-		 (*phi)[i] = gsl_ran_gaussian_ziggurat(r,1.0); 
+		 //(*phi)[i] = gsl_ran_gaussian_ziggurat(r,1.0); 
+		 (*phi)[i] = (i % 2 ? 1 : -1);
 	}
 	
 	// y - colloid (initially in the middle of the lattice, where the harmonic well stands)
@@ -294,7 +295,9 @@ void wipe(double** phi, double** y_colloid, parameter* params)
 	int n_sites, i;
 	n_sites = intpow(params->system_size, DIM);
 	for(i = 0; i < n_sites; i++){ 
-		 (*phi)[i] = gsl_ran_gaussian_ziggurat(r,1.0); 
+		 //(*phi)[i] = gsl_ran_gaussian_ziggurat(r,1.0); 
+		 //(*phi)[i] = 0;
+		 (*phi)[i] = (i % 2 ? 1 : -1);
 	}
 	
 	// y - colloid (initially in the middle of the lattice, where the harmonic well stands)
@@ -334,7 +337,15 @@ void evolveB(double** phi, double** y_colloid, long** neighbours, parameter* par
 	obvs->write_count = 0;
 	
 	for(tstep = 0; tstep < n_timestep; tstep++){									// Time evolution
-		
+		// v) Measures
+		if(tstep == next_writing_step)
+		{
+			//if(DEBUG){printf("Writing at t = %g, write count %i\n", tstep*params->delta_t, obvs->write_count);}
+			measure(phi, y_colloid, tstep, params, obvs); 												// Evaluate all sorts of correlators etc. herea
+			next_writing_step += write_time_delta_step;
+			obvs->write_count++;
+		}
+
 		// i) Create local copy of the colloid variable
 		for(i=0; i<DIM; i++) Y[i] = (*y_colloid)[i];	
 		
@@ -361,7 +372,6 @@ void evolveB(double** phi, double** y_colloid, long** neighbours, parameter* par
 		
 
 		// Add together to new step d/dt phi = -a * D2 phi - b D4 phi - u D2 (phi^3) + D * noise (D is nabla)
-		printf("time: %g ", tstep*params->delta_t);
 		phi_evolveB(phi, laplacian_phi, laplacian_square_phi, laplacian_phi_cubed, noise_gradient, n_sites, params, Y, neighbours);
 
 		// iv) Correction step for the colloid (with the evolved field)
@@ -379,15 +389,7 @@ void evolveB(double** phi, double** y_colloid, long** neighbours, parameter* par
 			(*y_colloid)[i] = Y[i] + 0.5*(F1[i]+F2)*params->delta_t + noise;
 		}
 
-		// v) Measures
-		if(tstep > next_writing_step)
-		{
-			//if(DEBUG){printf("Writing at t = %g, write count %i\n", tstep*params->delta_t, obvs->write_count);}
-			measure(phi, y_colloid, tstep, params, obvs); 												// Evaluate all sorts of correlators etc. herea
-			next_writing_step += write_time_delta_step;
-			obvs->write_count++;
-		}
-
+		
 	}
 }
 
@@ -463,13 +465,13 @@ void phi_evolveB(double** phi, double* laplacian_phi, double* laplacian_square_p
 	long i;
 	long L = params->system_size;
 	double delta_t = params->delta_t;
-	printf("phi_old: %g, lapl_2_phi: %g, lapl_phi: %g, lapl_3_phi: %g, grad_noise: %g\n", (*phi)[0], laplacian_square_phi[0], laplacian_phi[0], laplacian_phi_cubed[0], noise_gradient[0]);
+	//printf("phi_old: %g, lapl_2_phi: %g, lapl_phi: %g, lapl_3_phi: %g, grad_noise: %g\n", (*phi)[0], laplacian_square_phi[0], laplacian_phi[0], laplacian_phi_cubed[0], noise_gradient[0]);
 	for(i = 0; i < n_sites; i++){
-		(*phi)[i] += (delta_t*( laplacian_square_phi[i] + params->mass*laplacian_phi[i] + params->quartic_u * laplacian_phi_cubed[i]) + noise_gradient[i]);
+		(*phi)[i] += (delta_t*( -laplacian_square_phi[i] + params->mass*laplacian_phi[i] + params->quartic_u * laplacian_phi_cubed[i]) + noise_gradient[i]);
 	}
 	// Interaction with the colloid
 	int y_site = closest_site(Y,L);													// Finds the lattice site closest to Y, the colloid
-	(*phi)[y_site] += delta_t * params->lambda *2*DIM;
+	(*phi)[y_site] += delta_t * params->lambda *2*DIM;	// This sign stems from a global minus in front of the interaction term + the definition of the discrete Laplacian L(phi)[i] = \sum_{neighbours} \phi(j) - 2d \phi(i).
 	for(i = 0; i < 2*DIM; i++){(*phi)[neighbours[y_site][i]] -= delta_t * params->lambda;}
 }
 
@@ -610,6 +612,17 @@ void print_observables(observables* obvs, parameter* params)
 	int system_size = params->system_size;
 	int write_count = obvs->write_count;
 	double weight = 1/((double) params->mc_runs);
+
+	for(i = 0; i < write_count; i ++)
+	{
+		printf("#FIELDAVG %g", i * (obvs->write_time_delta));
+		for(j = 0; j < system_size; j++)
+		{
+			printf("\t%g", weight*(obvs->field_average[i][j]));
+		}
+		printf("\n");
+	}
+
 	for(i = 0; i < write_count; i ++)
 	{
 		printf("#FIELDCORR %g", i * (obvs->write_time_delta));
@@ -621,13 +634,6 @@ void print_observables(observables* obvs, parameter* params)
 	}
 
 	// Output MSD of colloid
-	int dim;
-	double centre_square;	// This is y(0)^2, to be subtracted from the measured square displacement for centering.
-	for(dim = 0; dim < DIM; dim++)
-	{
-		centre_square = intpow( ind2j(dim, ( intpow(system_size , DIM) )/2 , system_size) , 2);
-	}
-
 	for(i = 0; i < write_count; i++)
 	{
 		printf("# COLLOIDMSD %g", i * (obvs->write_time_delta));
