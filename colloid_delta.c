@@ -51,7 +51,8 @@ typedef struct{				// This structure bundles all observables
 	double** field_correlation;	// Saves the measured field-correlator < phi[0] phi[i]> for certain subset of i's (eg along an axis) AND at all writing times
 	double* colloid_msd;		// Saves the measured mean square displacement of the colloid at all writing times
 	double write_time_delta;	// This is the gap between writing times (at the moment linear, maybe later exponential writing times?) 
-	int write_count;
+	int write_count;		// This is a counter that is used to keep track where the measurements are written into
+	int total_writes;		// This is the total number of writing events that will occur.
 //	double* colloid_fpt_distribution;	// Saves the first-passage time distribution of the colloid
 } observables;
 
@@ -256,6 +257,7 @@ void initialise_observable(observables* obvs, parameter* params)
 	
 	int writing_times = (int)(1 + (((params->n_timestep)*params->delta_t)/obvs->write_time_delta)); // This counts how many writing events will occur in time (including t=0, thus + 1)
 	//if(DEBUG){printf("writing_times %i, n_timestep %lu, delta_t = %g, write_time_delta %g \n ", writing_times,params->n_timestep,  params->delta_t, obvs->write_time_delta);}
+	obvs->total_writes = writing_times;
 	CALLOC(obvs->colloid_msd, writing_times); // Save MSD vs time
 	CALLOC(obvs->field_average, writing_times); // Prepare writing_times many arrays to store averages
 	CALLOC(obvs->field_correlation, writing_times); // Prepare writing_times many arrays to store correlations
@@ -406,7 +408,6 @@ void evolveB(double** phi, double** y_colloid, long** neighbours, parameter* par
 		
 	}
 }
-
 // Model A evolution
 void evolveA(double** phi, double** y_colloid, long** neighbours, parameter* params, observables* obvs){
 	// Preparing variables for field evolution (Euler-Maruyama)
